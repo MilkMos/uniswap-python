@@ -48,7 +48,7 @@ def check_approval(method: Callable) -> Callable:
         need to be approved."""
 
     @functools.wraps(method)
-    def approved(self: Any, *args: Any, **kwargs: Any) -> Any:
+    def approved(self: Any, *args: Any) -> Any:
         # Check to see if the first token is actually ETH
         token = args[0] if args[0] != ETH_ADDRESS else None
         token_two = None
@@ -66,7 +66,7 @@ def check_approval(method: Callable) -> Callable:
             is_approved = self._is_approved(token_two)
             if not is_approved:
                 self.approve(token_two)
-        return method(self, *args, **kwargs)
+        return method(self, *args)
 
     return approved
 
@@ -115,7 +115,7 @@ def _validate_address(a: AddressLike) -> None:
     assert _addr_to_str(a)
 
 
-_netid_to_name = {1: "mainnet", 4: "rinkeby"}
+_netid_to_name = {1: "mainnet", 4: "rinkeby",3:"ropsten",42:'kovan'}
 
 
 class Uniswap:
@@ -282,6 +282,9 @@ class Uniswap:
         """Get the taker fee."""
         return 0.003
 
+
+
+
     # ------ Market --------------------------------------------------------------------
     @supports([1, 2])
     def get_eth_token_input_price(self, token: AddressLike, qty: Wei) -> Wei:
@@ -365,6 +368,17 @@ class Uniswap:
         balance: int = erc20.functions.balanceOf(self.address).call()
         return balance
 
+    def get_pool_balance(self,pair: AddressLike,tokenA: AddressLike, tokenB: AddressLike) -> list:
+        _validate_address(pair)
+        _validate_address(tokenA)
+        _validate_address(tokenB)
+        erc20A = self.erc20_contract(tokenA)
+        erc20B = self.erc20_contract(tokenB)
+        balanceA: int = erc20A.functions.balanceOf(pair).call()
+        balanceB: int = erc20B.functions.balanceOf(pair).call()
+        return balanceA,balanceB
+
+
     # ------ ERC20 Pool ----------------------------------------------------------------
     @supports([1])
     def get_ex_eth_balance(self, token: AddressLike) -> int:
@@ -390,27 +404,72 @@ class Uniswap:
         return float(token_reserve / eth_reserve)
 
     # ------ Liquidity -----------------------------------------------------------------
-    @supports([1])
+    @supports([2])
     @check_approval
-    def add_liquidity(
-        self, token: AddressLike, max_eth: Wei, min_liquidity: int = 1
-    ) -> HexBytes:
+    def add_liquidity(self, token: AddressLike, TokenAmount: int,Token_Min_Amount: int,WETHAmount: int) -> HexBytes:
         """Add liquidity to the pool."""
-        tx_params = self._get_tx_params(max_eth)
-        # Add 1 to avoid rounding errors, per
-        # https://hackmd.io/hthz9hXKQmSyXfMbPsut1g#Add-Liquidity-Calculations
-        max_token = int(max_eth * self.get_exchange_rate(token)) + 10
-        func_params = [min_liquidity, max_token, self._deadline()]
-        function = self.exchange_contract(token).functions.addLiquidity(*func_params)
-        return self._build_and_send_tx(function, tx_params)
+        tx_params = self._get_tx_params(WETHAmount)
+       # print(tx_params)
+        func_params = [token,TokenAmount,Token_Min_Amount,WETHAmount,_addr_to_str(self.address),self._deadline()]
+        print(func_params)
+        function = self.router.functions.addLiquidityETH(*func_params)
+        res = self._build_and_send_tx(function,tx_params)
+        return res
 
-    @supports([1])
+    @supports([2])
     @check_approval
-    def remove_liquidity(self, token: str, max_token: int) -> HexBytes:
+    def add_eth(self, token: AddressLike, pair:AddressLike,ETH_Amount: float, Token_Amount:float = None) -> HexBytes:
+        """Add liquidity to the pool."""
+        WETH = '0xd0A1E359811322d97991E03f863a0C30C2cF029C'
+        w,t = self.get_pool_balance(pair,WETH,token)
+        if w<= 0 or t<=0:
+            Token_Amount = int(Token_Amount*pow(10,18))
+            Token_Min_Amount = int(Token_Amount*pow(10,18)*0.995)
+        else:
+            Token_Amount = int(ETH_Amount/w*t*pow(10,18)*1.005)
+            Token_Min_Amount = int(ETH_Amount/w*t*pow(10,18)*0.995)
+        WETHAmount = int(ETH_Amount*pow(10,18))
+        tx_params = self._get_tx_params(WETHAmount)
+       # print(tx_params)
+        func_params = [token,Token_Amount,Token_Min_Amount,WETHAmount,_addr_to_str(self.address),self._deadline()]
+        print(func_params)
+        function = self.router.functions.addLiquidityETH(*func_params)
+        res = self._build_and_send_tx(function,tx_params)
+        return res
+
+    @supports([2])
+    @check_approval
+    def remove_liquidity(self, token: AddressLike, liquidity: int, amountTokenMin: int, amountETHMin: int) -> HexBytes:
         """Remove liquidity from the pool."""
-        func_params = [int(max_token), 1, 1, self._deadline()]
-        function = self.exchange_contract(token).functions.removeLiquidity(*func_params)
-        return self._build_and_send_tx(function)
+        tx_params = self._get_tx_params(amountETHMin)
+        func_params = [token,liquidity,amountTokenMin, amountETHMin, self._deadline()]
+        function = self.router.functions.removeLiquidityETH(*func_params)
+        return  self._build_and_send_tx(function,tx_params)
+
+    def remove_eth(self,token:AddressLike,pair:AddressLike,ETH_Amount:float) -> HexBytes:
+
+        WETH = '0xd0A1E359811322d97991E03f863a0C30C2cF029C'
+        w, t = self.get_pool_balance(pair, WETH, token)
+        Token_Amount = ETH_Amount/w*t
+        liquidity = int(pow(ETH_Amount*Token_Amount,0.5)*pow(10,18))
+        amountETHMin = int(ETH_Amount*pow(10,18)*0.995)
+        amountTokenMin = int(Token_Amount*pow(10,18)*0.995)
+        tx_params = self._get_tx_params()
+        #func_params = [token, liquidity, amountTokenMin, amountETHMin, "0x2B21e6e23E4E6F1C8f994Aee4bacF343DBA19B4C",self._deadline()]
+        func_params = [token, 5000000000000000,3219627485038692,7708349498256918,"0x2B21e6e23E4E6F1C8f994Aee4bacF343DBA19B4C",self._deadline()]
+        print(tx_params)
+        function = self.router.functions.removeLiquidityETH(*func_params)
+        return  self._build_and_send_tx(function,tx_params)
+
+
+    @supports([2])
+    @check_approval
+    def create_pair(self,token1: AddressLike, token2: AddressLike)  -> HexBytes:
+        """create pair"""
+        tx_params = self._get_tx_params(0)
+        func_params = [token1,token2]
+        function = self.factory_contract.functions.createPair(*func_params)
+        return self._build_and_send_tx(function, tx_params)
 
     # ------ Make Trade ----------------------------------------------------------------
     @check_approval
@@ -742,12 +801,13 @@ class Uniswap:
             logger.debug(f"nonce: {tx_params['nonce']}")
             self.last_nonce = Nonce(tx_params["nonce"] + 1)
 
-    def _get_tx_params(self, value: Wei = Wei(0), gas: Wei = Wei(250000)) -> TxParams:
+    def _get_tx_params(self, value: Wei = Wei(0), gas: Wei = Wei(6000000)) -> TxParams:
         """Get generic transaction parameters."""
         return {
             "from": _addr_to_str(self.address),
             "value": value,
             "gas": gas,
+            "gasPrice":100000000000,
             "nonce": max(
                 self.last_nonce, self.w3.eth.getTransactionCount(self.address)
             ),
